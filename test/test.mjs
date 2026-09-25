@@ -274,6 +274,26 @@ await check("getInlineImage 读取本地任意图片", async () => {
 	assert.ok(img && img.type === "image");
 	assert.ok(img.data.length > 0);
 });
+await check("一致性：未变化时重复取用 base64 逐字节一致", async () => {
+	const p = join(dataDir, "stable.png");
+	writeFileSync(p, PNG_BYTES);
+	const a = await getInlineImage(p);
+	const b = await getInlineImage(p);
+	assert.equal(a.data, b.data, "内存复用逐字节一致");
+	const raw = JSON.parse(readFileSync(join(dataDir, "stable.inline.json"), "utf8"));
+	assert.equal(raw.data, a.data, "磁盘缓存与内存一致");
+	assert.ok(raw.profile && raw.source, "缓存含来源+参数指纹");
+});
+await check("指纹校验：同路径文件改写后缓存失效、内容更新", async () => {
+	const p = join(dataDir, "mut.png");
+	writeFileSync(p, PNG_BYTES);
+	const a = await getInlineImage(p);
+	assert.equal(a.mimeType, "image/png");
+	await new Promise((r) => setTimeout(r, 20));
+	writeFileSync(p, GIF_BYTES);
+	const b = await getInlineImage(p);
+	assert.equal(b.mimeType, "image/gif", "文件改写后返回新内容");
+});
 
 console.log("预压缩（复用 pi 内置 processImage）");
 if (piDist) {

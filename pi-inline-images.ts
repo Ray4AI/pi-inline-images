@@ -44,7 +44,7 @@
  */
 
 import { Buffer } from "node:buffer";
-import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -68,6 +68,8 @@ const RESIZE_MAX_H = envNumber("PI_INLINE_IMAGES_MAX_H", 1536);
 const RESIZE_JPEG_Q = envNumber("PI_INLINE_IMAGES_JPEG_Q", 75);
 const RESIZE_MAX_B64_BYTES = Math.floor(envNumber("PI_INLINE_IMAGES_INLINE_MAX_KB", 1200) * 1024);
 const NO_COMPRESS = process.env.PI_INLINE_IMAGES_NO_COMPRESS === "1";
+/** 压缩参数指纹：参数变化后缓存自动失效并重新压缩（避免新旧压缩结果混用） */
+const COMPRESS_PROFILE = `${RESIZE_MAX_W}x${RESIZE_MAX_H}/q${RESIZE_JPEG_Q}/${RESIZE_MAX_B64_BYTES}${NO_COMPRESS ? "/raw" : ""}`;
 const USER_AGENT =
 	process.env.PI_INLINE_IMAGES_USER_AGENT ??
 	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36";
@@ -379,10 +381,24 @@ function hashFromLocalPath(path: string): string {
 	return basename(path).split(".")[0];
 }
 
+/**
+ * 源文件指纹（大小+mtime）：同路径文件被改写后缓存自动失效。
+ * 这保证同一引用在每次请求里展开出的 base64 逐字节一致，
+ * provider 侧 prompt cache 前缀不被意外打断。
+ */
+function sourceFingerprint(path: string): string | null {
+	try {
+		const st = statSync(path);
+		return `${st.size}:${Math.floor(st.mtimeMs)}`;
+	} catch {
+		return null;
+	}
+}
+
 // URL → 结果：并发去重 + 会话内免重复访问磁盘
 const acquireCache = new Map<string, Promise<AcquireResult>>();
-// 本地图片路径 → 压缩后的多模态块（内存一级缓存，引用复用零拷贝）
-const inlineCache = new Map<string, ImageContent>();
+// 本地图片路径 → 压缩后的多模态块（内存一级缓存，引用复用零拷贝；带指纹校验）
+const inlineCache = new Map<string, { source: string; profile: string; image: ImageContent }>();
 // 近期下载失败：本地路径 → 失败信息（节流：60s 内不重复请求同一个失败链接）
 const failureByPath = new Map<string, { url: string; error: string; until: number }>();
 const FAIL_RETRY_MS = 60_000;
@@ -495,12 +511,18 @@ async function acquireFileUncached(url: string, kind: string): Promise<AcquireRe
 	stats.filesSaved++;
 	stats.bytesDownloaded += bytes.byteLength;
 
-	// 4) 图片顺手预压缩（一次），结果写二级缓存
+	// 4) 图片顺手预压缩（一次），结果写二级缓存（含指纹，保证每次请求内容一致）
 	if (isImage && mime) {
 		try {
 			const inline = await compressImage(bytes, mime);
-			inlineCache.set(path, inline);
-			writeJsonAtomic(inlineCachePath(hash), { mimeType: inline.mimeType, data: inline.data });
+			const source = sourceFingerprint(path) ?? `${bytes.byteLength}:0`;
+			inlineCache.set(path, { source, profile: COMPRESS_PROFILE, image: inline });
+			writeJsonAtomic(inlineCachePath(hash), {
+				mimeType: inline.mimeType,
+				data: inline.data,
+				profile: COMPRESS_PROFILE,
+				source,
+			});
 			stats.bytesInline += Math.floor((inline.data.length * 3) / 4);
 		} catch {
 			// 压缩失败不致命：注入时会再试或退回原图
@@ -510,19 +532,32 @@ async function acquireFileUncached(url: string, kind: string): Promise<AcquireRe
 	return { ok: true, path, isImage, mimeType: mime, bytes: bytes.byteLength };
 }
 
-/** 取本地图片的多模态块（内存 → 磁盘二级缓存 → 读原图压缩一次） */
+/**
+ * 取本地图片的多模态块（内存 → 磁盘二级缓存 → 读原图压缩一次）。
+ * 缓存带【来源指纹 + 压缩参数指纹】：只有源文件和参数都没变才复用，
+ * 保证同一引用在历次请求中展开出的 base64 逐字节一致（prompt cache 不断）。
+ */
 export async function getInlineImage(path: string): Promise<ImageContent | null> {
+	const source = sourceFingerprint(path);
+	if (!source) return null; // 文件不存在
+
 	const cached = inlineCache.get(path);
-	if (cached) return cached;
+	if (cached && cached.source === source && cached.profile === COMPRESS_PROFILE) return cached.image;
 
 	const hash = hashFromLocalPath(path);
 	// 磁盘二级缓存
 	try {
 		const raw = readFileSync(inlineCachePath(hash), "utf8");
-		const parsed = JSON.parse(raw) as ImageContent;
-		if (parsed && typeof parsed.data === "string" && typeof parsed.mimeType === "string") {
+		const parsed = JSON.parse(raw) as { data?: string; mimeType?: string; profile?: string; source?: string };
+		if (
+			parsed &&
+			typeof parsed.data === "string" &&
+			typeof parsed.mimeType === "string" &&
+			parsed.profile === COMPRESS_PROFILE &&
+			parsed.source === source
+		) {
 			const image: ImageContent = { type: "image", data: parsed.data, mimeType: parsed.mimeType };
-			inlineCache.set(path, image);
+			inlineCache.set(path, { source, profile: COMPRESS_PROFILE, image });
 			stats.cacheHits++;
 			return image;
 		}
@@ -540,10 +575,15 @@ export async function getInlineImage(path: string): Promise<ImageContent | null>
 	if (!mime || !mime.startsWith("image/")) return null;
 
 	const inline = await compressImage(bytes, mime);
-	inlineCache.set(path, inline);
+	inlineCache.set(path, { source, profile: COMPRESS_PROFILE, image: inline });
 	try {
 		ensureDataDir();
-		writeJsonAtomic(inlineCachePath(hash), { mimeType: inline.mimeType, data: inline.data });
+		writeJsonAtomic(inlineCachePath(hash), {
+			mimeType: inline.mimeType,
+			data: inline.data,
+			profile: COMPRESS_PROFILE,
+			source,
+		});
 	} catch {
 		// 二级缓存写失败无所谓
 	}
