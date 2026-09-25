@@ -284,6 +284,17 @@ await check("一致性：未变化时重复取用 base64 逐字节一致", async
 	assert.equal(raw.data, a.data, "磁盘缓存与内存一致");
 	assert.ok(raw.profile && raw.source, "缓存含来源+参数指纹");
 });
+await check("一致性：清空内存缓存（模拟重启/fork 重放）后仍逐字节一致", async () => {
+	const p = join(dataDir, "persist.png");
+	writeFileSync(p, PNG_BYTES);
+	const a = await getInlineImage(p);
+	clearCaches(); // 模拟进程重启 / 切换分支后重建上下文：只剩磁盘缓存
+	const b = await getInlineImage(p);
+	assert.equal(a.data, b.data, "磁盘缓存保证跨重启一致");
+	const c = await expandRefs(`看图 [img:${p}] 说明`);
+	const img = c.blocks.find((x) => x.type === "image");
+	assert.equal(img.data, a.data, "任意时机展开结果逐字节一致");
+});
 await check("指纹校验：同路径文件改写后缓存失效、内容更新", async () => {
 	const p = join(dataDir, "mut.png");
 	writeFileSync(p, PNG_BYTES);
