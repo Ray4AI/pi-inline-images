@@ -82,22 +82,31 @@
 
 ## 安装
 
-**Linux / macOS**
+**推荐：pi 包管理（安装 / 卸载 / 更新一条命令）**
 
 ```bash
-git clone https://github.com/Ray4AI/pi-inline-images
-cd pi-inline-images && ./install.sh        # 或 ./install.sh --link 开发模式
+pi install git:github.com/Ray4AI/pi-inline-images     # 安装（个人级，写入 ~/.pi/agent/settings.json）
+pi list                                               # 查看已安装包
+pi update --extensions                                # 更新到最新
+pi remove git:github.com/Ray4AI/pi-inline-images     # 卸载
 ```
 
-**Windows（PowerShell）**
+项目级安装加 `--local`（写入 `.pi/settings.json`，需项目信任后生效）。
 
-```powershell
+**开发 / 手动安装（备选）**
+
+```bash
+# Linux/macOS
+git clone https://github.com/Ray4AI/pi-inline-images && cd pi-inline-images
+./install.sh          # 复制到 ~/.pi/agent/extensions/；--link 为软链开发模式
+
+# Windows（PowerShell）
 git clone https://github.com/Ray4AI/pi-inline-images
 cd pi-inline-images
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-重启 pi（或 `/reload`）生效。手动安装：把 `pi-inline-images.ts` 复制到 `~/.pi/agent/extensions/`（Windows：`%USERPROFILE%\.pi\agent\extensions\`）即可，无任何 npm 依赖。
+重启 pi（或 `/reload`）生效。无任何 npm 依赖。
 
 ## 配置（环境变量，均可选）
 

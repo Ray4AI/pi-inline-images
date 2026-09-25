@@ -1,0 +1,14 @@
+{
+	"name": "pi-inline-images",
+	"version": "1.0.0",
+	"description": "Turn file direct-link markers ([png:url], [srt:url], ...) into multimodal image blocks / local file paths, pre-compressed and cache-stable",
+	"keywords": ["pi-package"],
+	"license": "MIT",
+	"pi": {
+		"extensions": ["./pi-inline-images.ts"]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-ai": "*"
+	}
+}
